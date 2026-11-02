@@ -10,8 +10,10 @@ The application is written in Python and uses **PyQt6** for its interface, scree
 - Operator preview with floating ON/OFF AIR and slideshow status bubbles.
 - Manual next/back navigation and a random navigation option.
 - Timed slideshows with intervals from 2 to 60 seconds, optional automatic start with projection, and an option to let videos finish.
+- Optional looping slideshow music (MP3 and other supported audio files), with a file chooser and a saved **Play music with slideshow** setting.
 - Folder loading, optional subfolder scanning, search, sorting, and photo/video filters.
 - Distinct photo and filmstrip icons in the file list.
+- Compact icon-only Back, Next, Mute/Unmute, Refresh, and video Play/Pause controls, with tooltips and accessible labels updated for their current action and theme.
 - Video play/pause, seeking, looping, volume, and mute/unmute controls.
 - Five themes: Obsidian Neon, Midnight Studio, Cyberpunk Amber, Slate Graphite, and Dark Gray. Dark Gray uses neutral backgrounds throughout the interface.
 - Saved window, display, theme, folder, slideshow, and audio preferences.
@@ -47,6 +49,14 @@ Pillow, OpenCV, and NumPy are not required by the application.
 5. For automatic playback, choose an interval and click **Start Slideshow**. Enable **Let videos finish** if each video should complete before advancing.
 6. Use **Stop Projecting** to close the audience window. Video controls and the playback timer appear beneath the operator preview when a video is selected.
 
+Videos selected at startup or while browsing load a still frame without autoplaying. Use the video play/pause icon to preview them offline, or **Start Projecting** to play them on the audience display. Pausing keeps the current frame visible, and starting projection continues the selected video from its current position. During projection, newly selected videos play automatically. The square **Stop** icon to the left of Play/Pause stops the video and resets it to the beginning. **Stop Projecting** also stops and resets the video; offline playback controls remain available.
+
+**Start Slideshow** also plays videos automatically in the preview while offline (without projecting), including the currently selected video. **Let videos finish** waits for playback to end before advancing, just as during projection. **Pause Slideshow** stops and rewinds the current video to its opening frame; starting the slideshow again plays it from the beginning.
+
+When a slideshow is already running offline, **Start Projecting** restarts the current video and slideshow music from the beginning for the audience and resets the slideshow interval. On a video slide, music waits until the next image, then plays from the beginning.
+
+Use **Choose Music...** in the slideshow section to select an audio file. Check **Play music with slideshow** to start and loop it with **Start Slideshow**; uncheck it to disable background music. Music plays only on image slides, pauses when a video appears, and resumes from the same position on the next image. It also pauses and resumes with the slideshow, and stops when projection ends or the app closes. The master volume and mute controls affect both music and video audio. **Clear** removes the selected music. The music path and checkbox setting are remembered between sessions; unavailable or unplayable files show a message beside the chooser.
+
 ## Build the executable
 
 Install the build and executable-verification tools in the same environment:
@@ -65,9 +75,9 @@ The output is `dist/DualScreenPresenter.exe`. The spec produces a single Windows
 .\.venv\Scripts\python.exe tests/verify_executable.py
 ```
 
-The preview checks run Qt offscreen with isolated settings. They cover image resizing, video-frame rendering, playback of a sample video, status updates, Dark Gray theme styling, mute-button sizing, and the single playback timer.
+The preview checks run Qt offscreen with isolated settings. They cover image resizing, video-frame rendering, playback of a sample video, status updates, Dark Gray theme styling, mute-button sizing, the single playback timer, real audio looping, music lifecycle and preferences, and themed control icons.
 
-Run the executable check after building. It verifies the Windows GUI subsystem, embedded icon, sample media, application modules, Qt libraries, and FFmpeg video backend.
+Run the executable check after building. It verifies the Windows GUI subsystem, embedded icon, sample media, application modules, Qt libraries, and FFmpeg video backend. It also launches the packaged app offscreen and requires successful GUI initialization and a clean exit. The build spec restricts DLL discovery to Python, Qt, and Windows directories so unrelated tools on PATH cannot supply incompatible libraries.
 
 ## Keyboard shortcuts
 
