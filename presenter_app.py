@@ -2,7 +2,7 @@
 presenter_app.py - Main operator control window for DualScreen Presenter — Broadcast Console.
 Orchestrates secondary monitor projection, timed slideshow automation with selectable intervals,
 randomized navigation mode via checkbox, multi-theme customization, master audio volume,
-and synchronized live preview with clean icon-free compact buttons.
+and synchronized live preview with themed compact controls.
 """
 
 import os
@@ -20,7 +20,7 @@ from PyQt6.QtGui import (
     QGuiApplication, QScreen, QIcon, QKeySequence, QShortcut,
     QColor, QDragEnterEvent, QDropEvent, QPixmap, QPainter, QPen, QPolygonF
 )
-from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput, QVideoSink
+from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput, QVideoSink, QVideoFrame
 
 from media_manager import MediaManager, MediaItem
 from projector_window import ProjectorWindow
@@ -69,6 +69,47 @@ def _media_type_icon(is_video: bool, color: QColor) -> QIcon:
     return QIcon(pixmap)
 
 
+def _control_icon(name: str, color: QColor) -> QIcon:
+    """Use the same antialiased outline style as the playlist media icons."""
+    pixmap = QPixmap(72, 72)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.scale(3, 3)
+    painter.setPen(QPen(color, 1.6, Qt.PenStyle.SolidLine,
+                        Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    if name in ("back", "next"):
+        if name == "back":
+            painter.translate(24, 0)
+            painter.scale(-1, 1)
+        painter.drawLine(4, 12, 20, 12)
+        painter.drawPolyline(QPolygonF([QPointF(13, 5), QPointF(20, 12), QPointF(13, 19)]))
+    elif name == "refresh":
+        painter.drawArc(4, 4, 16, 16, 45 * 16, 285 * 16)
+        painter.drawPolyline(QPolygonF([QPointF(20, 3), QPointF(20, 9), QPointF(14, 9)]))
+    elif name == "play":
+        painter.drawPolygon(QPolygonF([QPointF(7, 4), QPointF(20, 12), QPointF(7, 20)]))
+    elif name == "pause":
+        painter.drawRoundedRect(5, 4, 4, 16, 1, 1)
+        painter.drawRoundedRect(15, 4, 4, 16, 1, 1)
+    elif name == "stop":
+        painter.drawRoundedRect(5, 5, 14, 14, 1, 1)
+    else:
+        painter.drawPolygon(QPolygonF([
+            QPointF(3, 9), QPointF(7, 9), QPointF(12, 5),
+            QPointF(12, 19), QPointF(7, 15), QPointF(3, 15),
+        ]))
+        if name == "muted":
+            painter.drawLine(16, 9, 22, 15)
+            painter.drawLine(16, 15, 22, 9)
+        else:
+            painter.drawArc(11, 7, 8, 10, -60 * 16, 120 * 16)
+            painter.drawArc(11, 3, 12, 18, -60 * 16, 120 * 16)
+    painter.end()
+    return QIcon(pixmap)
+
+
 class PresenterApp(QMainWindow):
     """Main window with presentation control deck, slideshow engine, and live preview."""
 
@@ -86,6 +127,7 @@ class PresenterApp(QMainWindow):
         self.is_projecting = False
         self.projector_window: Optional[ProjectorWindow] = None
         self._is_scrubbing = False
+        self._video_start_frame = None
         self._last_volume = 75
         self.current_theme = "Obsidian Neon"
         self._media_type_icons = {}
@@ -103,6 +145,16 @@ class PresenterApp(QMainWindow):
         self.audio_output = QAudioOutput(self)
         self.player.setAudioOutput(self.audio_output)
         self.audio_output.setVolume(self._last_volume / 100.0)
+
+        self.music_path = ""
+        self.music_player = QMediaPlayer(self)
+        self.music_audio_output = QAudioOutput(self)
+        self.music_player.setAudioOutput(self.music_audio_output)
+        self.music_player.setLoops(QMediaPlayer.Loops.Infinite)
+        self.music_audio_output.setVolume(self.audio_output.volume())
+        self.audio_output.volumeChanged.connect(self.music_audio_output.setVolume)
+        self.audio_output.mutedChanged.connect(self.music_audio_output.setMuted)
+        self.music_player.errorOccurred.connect(self._on_music_error)
 
         # Single centralized video sink feeds BOTH preview monitor and secondary projector
         self.video_sink = QVideoSink(self)
@@ -149,6 +201,17 @@ class PresenterApp(QMainWindow):
         # 4. BOTTOM MASTER CONTROL DECK
         bottom_deck = self._build_bottom_deck()
         main_layout.addWidget(bottom_deck)
+
+        for button, label in (
+            (self.back_btn, "Back"), (self.next_btn, "Next"),
+            (self.mute_btn, "Mute"), (self.refresh_screens_btn, "Refresh"),
+            (self.play_pause_btn, "Play video"),
+            (self.video_stop_btn, "Stop video"),
+        ):
+            button.setText("")
+            button.setAccessibleName(label)
+            button.setFixedSize(36, 30)
+            button.setStyleSheet("padding: 4px;")
 
     def _build_header_card(self) -> QFrame:
         card = QFrame()
@@ -253,8 +316,11 @@ class PresenterApp(QMainWindow):
         """Bar for automated timed slideshow controls and countdown progress."""
         bar = QFrame()
         bar.setObjectName("SlideshowBanner")
-        layout = QHBoxLayout(bar)
-        layout.setContentsMargins(8, 4, 8, 4)
+        bar_layout = QVBoxLayout(bar)
+        bar_layout.setContentsMargins(8, 4, 8, 4)
+        bar_layout.setSpacing(6)
+        layout = QHBoxLayout()
+        bar_layout.addLayout(layout)
         layout.setSpacing(12)
 
         # Slideshow Play / Pause Button
@@ -309,6 +375,28 @@ class PresenterApp(QMainWindow):
         self.countdown_lbl.setProperty("tone", "secondary")
         self.countdown_lbl.setStyleSheet("font-size: 11px; font-weight: 600; min-width: 85px;")
         layout.addWidget(self.countdown_lbl)
+
+        music_layout = QHBoxLayout()
+        music_layout.setSpacing(8)
+        self.music_browse_btn = QPushButton("Choose Music...")
+        self.music_browse_btn.setToolTip("Choose background music to loop during the slideshow")
+        self.music_browse_btn.clicked.connect(self.on_browse_music)
+        music_layout.addWidget(self.music_browse_btn)
+        self.music_path_lbl = QLineEdit()
+        self.music_path_lbl.setReadOnly(True)
+        self.music_path_lbl.setPlaceholderText("No slideshow music selected")
+        self.music_path_lbl.setAccessibleName("Slideshow music file")
+        music_layout.addWidget(self.music_path_lbl, 1)
+        self.music_clear_btn = QPushButton("Clear")
+        self.music_clear_btn.setEnabled(False)
+        self.music_clear_btn.clicked.connect(lambda: self._set_music_file(""))
+        music_layout.addWidget(self.music_clear_btn)
+        self.music_start_chk = QCheckBox("Play music with slideshow")
+        self.music_start_chk.setChecked(True)
+        self.music_start_chk.setToolTip("Loop music on image slides; pause on videos and resume on the next image")
+        self.music_start_chk.toggled.connect(self._sync_slideshow_music)
+        music_layout.addWidget(self.music_start_chk)
+        bar_layout.addLayout(music_layout)
 
         return bar
 
@@ -413,8 +501,15 @@ class PresenterApp(QMainWindow):
         trans_layout.setContentsMargins(6, 3, 6, 3)
         trans_layout.setSpacing(8)
 
-        self.play_pause_btn = QPushButton("Pause")
-        self.play_pause_btn.setToolTip("Play / Pause Video (Space)")
+        self.video_stop_btn = QPushButton()
+        self.video_stop_btn.setEnabled(False)
+        self.video_stop_btn.setToolTip("Stop video and return to the beginning")
+        self.video_stop_btn.clicked.connect(self.stop_video)
+        trans_layout.addWidget(self.video_stop_btn)
+
+        self.play_pause_btn = QPushButton()
+        self.play_pause_btn.setEnabled(False)
+        self.play_pause_btn.setToolTip("Play video")
         self.play_pause_btn.clicked.connect(self.toggle_play_pause)
         trans_layout.addWidget(self.play_pause_btn)
 
@@ -540,7 +635,6 @@ class PresenterApp(QMainWindow):
         self.mute_btn = QPushButton("Mute")
         self.mute_btn.setObjectName("MuteBtn")
         self.mute_btn.setToolTip("Toggle Mute (M)")
-        self.mute_btn.setMinimumWidth(76)
         self.mute_btn.clicked.connect(self.toggle_mute)
         vol_layout.addWidget(self.mute_btn)
 
@@ -615,6 +709,36 @@ class PresenterApp(QMainWindow):
             row = self.playlist_widget.item(index)
             if row is not None:
                 row.setIcon(self._media_type_icons[item.media_type])
+        color = QColor(palette["text_primary"])
+        for button, name in ((self.back_btn, "back"), (self.next_btn, "next"),
+                             (self.refresh_screens_btn, "refresh"),
+                             (self.video_stop_btn, "stop")):
+            button.setIcon(_control_icon(name, color))
+            button.setIconSize(QSize(18, 18))
+        self._update_mute_icon()
+        self._update_play_pause_icon()
+
+    def _update_mute_icon(self):
+        palette = THEME_PALETTES.get(self.current_theme, THEME_PALETTES["Obsidian Neon"])
+        self.mute_btn.setIcon(_control_icon(
+            "muted" if self.audio_output.isMuted() else "volume",
+            QColor(palette["text_primary"]),
+        ))
+        self.mute_btn.setIconSize(QSize(18, 18))
+        action = "Unmute" if self.audio_output.isMuted() else "Mute"
+        self.mute_btn.setAccessibleName(action)
+        self.mute_btn.setToolTip(f"{action} (M)")
+
+    def _update_play_pause_icon(self):
+        palette = THEME_PALETTES.get(self.current_theme, THEME_PALETTES["Obsidian Neon"])
+        playing = self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+        self.play_pause_btn.setIcon(_control_icon(
+            "pause" if playing else "play", QColor(palette["text_primary"]),
+        ))
+        self.play_pause_btn.setIconSize(QSize(18, 18))
+        action = "Pause video" if playing else "Play video"
+        self.play_pause_btn.setAccessibleName(action)
+        self.play_pause_btn.setToolTip(action)
 
     # ==================== DISPLAY DETECTION & MANAGEMENT ====================
 
@@ -672,6 +796,14 @@ class PresenterApp(QMainWindow):
             QMessageBox.warning(self, "No Display", "No monitor detected.")
             return
 
+        current_item = self.media_mgr.get_current_item()
+        if not self.is_projecting and self.slideshow_running:
+            self.music_player.stop()
+            self.music_player.setPosition(0)
+            if current_item and current_item.is_video:
+                self.stop_video()
+            self._reset_slideshow_timer()
+
         if not self.projector_window:
             self.projector_window = ProjectorWindow()
             self.projector_window.close_requested.connect(self.stop_projecting)
@@ -697,10 +829,14 @@ class PresenterApp(QMainWindow):
 
     def stop_projecting(self):
         """Close fullscreen projection on the secondary monitor."""
+        self.pause_slideshow()
+        self.music_player.stop()
+        self.stop_video()
         if not self.is_projecting:
             return
 
         self.is_projecting = False
+        self._update_play_pause_icon()
         self.start_proj_btn.setEnabled(True)
         self.stop_proj_btn.setEnabled(False)
 
@@ -730,6 +866,41 @@ class PresenterApp(QMainWindow):
 
     # ==================== TIMED SLIDESHOW AUTOMATION ====================
 
+    def on_browse_music(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Choose Slideshow Music", os.path.dirname(self.music_path),
+            "Audio files (*.mp3 *.wav *.ogg *.flac *.m4a *.aac *.wma);;All files (*)",
+        )
+        if path:
+            self._set_music_file(path)
+
+    def _set_music_file(self, path: str):
+        self.music_player.stop()
+        self.music_path = path
+        self.music_path_lbl.setText(os.path.basename(path))
+        self.music_path_lbl.setToolTip(path)
+        self.music_clear_btn.setEnabled(bool(path))
+        self.music_player.setSource(QUrl.fromLocalFile(path) if path else QUrl())
+        self._sync_slideshow_music()
+
+    def _sync_slideshow_music(self, item=None):
+        # Checkbox signals pass a bool; display_item passes the actual slide.
+        if not isinstance(item, MediaItem):
+            item = self.media_mgr.get_current_item()
+        if (self.slideshow_running and self.music_start_chk.isChecked()
+                and self.music_path and item and item.is_image):
+            if not os.path.isfile(self.music_path):
+                self.music_path_lbl.setText("Music file unavailable — choose another file")
+                self.music_player.stop()
+                return
+            self.music_player.play()
+        else:
+            self.music_player.pause()
+
+    def _on_music_error(self, error, message):
+        self.music_path_lbl.setText("Unable to play music — choose another file")
+        self.music_path_lbl.setToolTip(f"{self.music_path}\n{message}")
+
     def toggle_slideshow(self):
         if self.slideshow_running:
             self.pause_slideshow()
@@ -750,6 +921,10 @@ class PresenterApp(QMainWindow):
 
         self._reset_slideshow_timer()
         self.slideshow_timer.start()
+        self._sync_slideshow_music()
+        current_item = self.media_mgr.get_current_item()
+        if current_item and current_item.is_video:
+            self.player.play()
         self._update_slideshow_ui_status()
 
     def pause_slideshow(self):
@@ -757,6 +932,8 @@ class PresenterApp(QMainWindow):
         self.slideshow_toggle_btn.setText("Start Slideshow")
         self.slideshow_toggle_btn.setStyleSheet("")
         self.slideshow_timer.stop()
+        self.music_player.pause()
+        self.stop_video()
         self.countdown_bar.setValue(0)
         self.countdown_lbl.setText("Slideshow Paused")
         self._update_slideshow_ui_status()
@@ -780,6 +957,11 @@ class PresenterApp(QMainWindow):
 
     def _on_slideshow_tick(self):
         if not self.slideshow_running:
+            return
+
+        if not self.media_mgr.filtered_items:
+            self.pause_slideshow()
+            self.music_player.stop()
             return
 
         current_item = self.media_mgr.get_current_item()
@@ -979,6 +1161,7 @@ class PresenterApp(QMainWindow):
 
     def display_item(self, item: MediaItem):
         """Present media item on both preview monitor and secondary projector."""
+        self._sync_slideshow_music(item)
         idx_str = f"[{self.media_mgr.current_index + 1} of {self.media_mgr.count()}]"
         self.meta_title_lbl.setText(f"{idx_str}  {item.filename}")
         self.meta_info_lbl.setText(f"{item.media_type.upper()} • {item.size_str}")
@@ -996,34 +1179,63 @@ class PresenterApp(QMainWindow):
 
         elif item.is_video:
             self.transport_frame.show()
-            self.play_pause_btn.setText("Pause")
-            self.preview_widget.set_video(item)
+            self.play_pause_btn.setEnabled(True)
+            self.video_stop_btn.setEnabled(True)
+            source = QUrl.fromLocalFile(item.path)
+            same_video = (self.player.source() == source
+                          and self.preview_widget.mode == "video")
+            if not same_video:
+                self.player.stop()
+                self._video_start_frame = None
+                self.preview_widget.set_video(item)
+                self.player.setSource(source)
 
             if self.is_projecting and self.projector_window:
                 self.projector_window.prepare_for_video(item)
 
-            self.player.setSource(QUrl.fromLocalFile(item.path))
-            self.player.play()
+            if self.is_projecting or self.slideshow_running:
+                self.player.play()
+            elif not same_video:
+                # Load a still frame without advancing playback or emitting audio.
+                self.player.pause()
+            self._update_play_pause_icon()
 
     def _on_video_frame(self, frame):
         """Unified video frame receiver: mirrors to preview and projector screen."""
         self.preview_widget.update_video_frame(frame)
+        if (self.preview_widget.mode == "video" and self._video_start_frame is None
+                and self.preview_widget.display_label.media is not None):
+            self._video_start_frame = self.preview_widget.display_label.media.copy()
         if self.is_projecting and self.projector_window:
             self.projector_window.update_video_frame(frame)
 
     # ==================== VIDEO PLAYBACK CONTROLS ====================
 
+    def stop_video(self):
+        """Stop playback, rewind, and restore the opening frame without autoplay."""
+        if self.preview_widget.mode != "video":
+            return
+        self._is_scrubbing = False
+        self.player.stop()
+        self.player.setPosition(0)
+        self.timeline_slider.setValue(0)
+        self._update_time_label(0, self.player.duration())
+        if self._video_start_frame is not None:
+            self.preview_widget.update_video_frame(self._video_start_frame)
+            if self.is_projecting and self.projector_window:
+                self.projector_window.update_video_frame(QVideoFrame(self._video_start_frame))
+        self._update_play_pause_icon()
+
     def toggle_play_pause(self):
+        if self.preview_widget.mode != "video":
+            return
         if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             self.player.pause()
         else:
             self.player.play()
 
     def on_player_state_changed(self, state: QMediaPlayer.PlaybackState):
-        if state == QMediaPlayer.PlaybackState.PlayingState:
-            self.play_pause_btn.setText("Pause")
-        else:
-            self.play_pause_btn.setText("Play")
+        self._update_play_pause_icon()
 
     def on_player_position_changed(self, position_ms: int):
         if not self._is_scrubbing:
@@ -1076,17 +1288,16 @@ class PresenterApp(QMainWindow):
         self.vol_label.setText(f"{value}%")
         if self.audio_output.isMuted() and value > 0:
             self.audio_output.setMuted(False)
-            self.mute_btn.setText("Mute")
+        self._update_mute_icon()
 
     def toggle_mute(self):
         muted = not self.audio_output.isMuted()
         self.audio_output.setMuted(muted)
         if muted:
-            self.mute_btn.setText("Unmute")
             self.vol_label.setText("Mute")
         else:
-            self.mute_btn.setText("Mute")
             self.vol_label.setText(f"{self.vol_slider.value()}%")
+        self._update_mute_icon()
 
     def volume_up(self):
         val = min(100, self.vol_slider.value() + 5)
@@ -1174,6 +1385,8 @@ class PresenterApp(QMainWindow):
             pass
         self.autostart_chk.setChecked(_to_bool(s.value("slideshow/autostart", True)))
         self.video_wait_chk.setChecked(_to_bool(s.value("slideshow/video_wait", True)))
+        self.music_start_chk.setChecked(_to_bool(s.value("slideshow/music_enabled", True)))
+        self._set_music_file(s.value("slideshow/music_path", ""))
 
         # --- Navigation ---
         self.random_chk.setChecked(_to_bool(s.value("nav/random", False)))
@@ -1233,6 +1446,8 @@ class PresenterApp(QMainWindow):
         s.setValue("slideshow/interval_index", self.interval_combo.currentIndex())
         s.setValue("slideshow/autostart",      self.autostart_chk.isChecked())
         s.setValue("slideshow/video_wait",     self.video_wait_chk.isChecked())
+        s.setValue("slideshow/music_enabled", self.music_start_chk.isChecked())
+        s.setValue("slideshow/music_path", self.music_path)
 
         # Navigation
         s.setValue("nav/random", self.random_chk.isChecked())
@@ -1257,6 +1472,9 @@ class PresenterApp(QMainWindow):
         self._save_settings()
         self.slideshow_timer.stop()
         self.player.stop()
+        self.player.setSource(QUrl())
+        self.music_player.stop()
+        self.music_player.setSource(QUrl())
         if self.projector_window:
             self.projector_window.close()
         event.accept()
