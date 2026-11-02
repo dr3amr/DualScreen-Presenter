@@ -7,7 +7,7 @@ import sys
 import os
 import ctypes
 from PyQt6.QtWidgets import QApplication
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QIcon, QPixmap, QPainter, QColor
 
 from presenter_app import PresenterApp
@@ -73,6 +73,18 @@ def main():
     window = PresenterApp()
     window.setWindowIcon(app_icon)
     window.show()
+
+    # Exercise the real packaged startup and event loop without changing
+    # preferences. The marker proves initialization reached the GUI.
+    if len(sys.argv) == 3 and sys.argv[1] == "--smoke-test":
+        window._save_settings = lambda: None
+
+        def finish_smoke_test():
+            with open(sys.argv[2], "w", encoding="utf-8") as result:
+                result.write("GUI initialized successfully\n")
+            window.close()
+
+        QTimer.singleShot(200, finish_smoke_test)
 
     sys.exit(app.exec())
 
